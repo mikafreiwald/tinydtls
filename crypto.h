@@ -55,7 +55,10 @@ typedef uint8_t dtls_cipher_index_t;
 #define DTLS_CIPHER_INDEX_NULL 0
 
 /** Maximum number of cipher suites */
-#define DTLS_MAX_CIPHER_SUITES 4
+#define DTLS_MAX_CIPHER_SUITES 6 // MF: TODO change to 2
+
+/** Maximum number of key exchange algorithms */
+#define DTLS_MAX_KEY_EXCHANGE_ALGORITHMS 2
 
 typedef enum { AES128=0 
 } dtls_crypto_alg;
@@ -139,6 +142,7 @@ typedef struct dtls_user_parameters_t {
    * The list must be terminated by TLS_NULL_WITH_NULL_NULL.
    */
   dtls_cipher_t cipher_suites[DTLS_MAX_CIPHER_SUITES + 1];
+  dtls_key_exchange_algorithm_t key_exchange_algorithms[DTLS_MAX_KEY_EXCHANGE_ALGORITHMS + 1];
   unsigned int force_extended_master_secret:1; /** force extended master secret extension (RFC7627) */
 } dtls_user_parameters_t;
 

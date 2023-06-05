@@ -589,6 +589,9 @@ static const dtls_user_parameters_t default_user_parameters = {
     DTLS_DEFAULT_CIPHER_SUITES,
 #else /* DTLS_DEFAULT_CIPHER_SUITES */
     {
+      TLS_AES_128_CCM_SHA256,
+      TLS_AES_128_CCM_8_SHA256,
+// MF: TODO Remove
 #ifdef DTLS_ECC
       TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8,
       TLS_ECDHE_ECDSA_WITH_AES_128_CCM,
@@ -602,7 +605,17 @@ static const dtls_user_parameters_t default_user_parameters = {
        TLS_NULL_WITH_NULL_NULL
     },
 #endif /* DTLS_DEFAULT_CIPHER_SUITES */
-  .force_extended_master_secret = 1,
+  .key_exchange_algorithms =
+    {
+#ifdef DTLS_ECC
+      DTLS_KEY_EXCHANGE_ECDHE_ECDSA,
+#endif /* DTLS_ECC */
+#ifdef DTLS_PSK
+      DTLS_KEY_EXCHANGE_PSK,
+#endif /* DTLS_PSK */
+      DTLS_KEY_EXCHANGE_NONE
+    },
+  .force_extended_master_secret = 0, // MF: not necessary for 1.3
 };
 
 /** only one compression method is currently defined */
@@ -610,16 +623,18 @@ static uint8 compression_methods[] = {
   TLS_COMPRESSION_NULL
 };
 
+/* MF: moved to global.h
 typedef enum {
   DTLS_KEY_EXCHANGE_NONE,
   DTLS_KEY_EXCHANGE_PSK,
   DTLS_KEY_EXCHANGE_ECDHE_ECDSA
 } cipher_suite_key_exchange_algorithm_t;
+*/
 
 typedef struct cipher_suite_param_t {
   dtls_cipher_t cipher_suite;
   uint8_t mac_length;
-  cipher_suite_key_exchange_algorithm_t key_exchange_algorithm;
+  dtls_key_exchange_algorithm_t key_exchange_algorithm;
 } cipher_suite_param_t;
 
 static const struct cipher_suite_param_t cipher_suite_params[] = {
@@ -627,10 +642,16 @@ static const struct cipher_suite_param_t cipher_suite_params[] = {
    * in this table (index DTLS_CIPHER_INDEX_NULL) */
   { TLS_NULL_WITH_NULL_NULL,             0, DTLS_KEY_EXCHANGE_NONE },
 #ifdef DTLS_PSK
+  { TLS_AES_128_CCM_8_SHA256,            8, DTLS_KEY_EXCHANGE_PSK },
+  { TLS_AES_128_CCM_SHA256,             16, DTLS_KEY_EXCHANGE_PSK },
+  // MF: TODO remove
   { TLS_PSK_WITH_AES_128_CCM_8,          8, DTLS_KEY_EXCHANGE_PSK },
   { TLS_PSK_WITH_AES_128_CCM,           16, DTLS_KEY_EXCHANGE_PSK },
 #endif /* DTLS_PSK */
 #ifdef DTLS_ECC
+  { TLS_AES_128_CCM_8_SHA256,            8, DTLS_KEY_EXCHANGE_ECDHE_ECDSA },
+  { TLS_AES_128_CCM_SHA256,             16, DTLS_KEY_EXCHANGE_ECDHE_ECDSA },
+  // MF: TODO remove
   { TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8,  8, DTLS_KEY_EXCHANGE_ECDHE_ECDSA },
   { TLS_ECDHE_ECDSA_WITH_AES_128_CCM,   16, DTLS_KEY_EXCHANGE_ECDHE_ECDSA },
 #endif /* DTLS_ECC */
@@ -659,6 +680,19 @@ contains_cipher_suite(const dtls_cipher_t* cipher_suites, const dtls_cipher_t ci
   return *cipher_suites == cipher_suite;
 }
 
+static inline uint8_t
+contains_key_exchange_algorithm(const dtls_key_exchange_algorithm_t* algorithms,
+                                const dtls_key_exchange_algorithm_t algorithm) {
+  if (algorithm == DTLS_KEY_EXCHANGE_NONE) {
+    return 0;
+  }
+  while ((*algorithms != algorithm) &&
+         (*algorithms != DTLS_KEY_EXCHANGE_NONE)) {
+    algorithms++;
+  }
+  return *algorithms == algorithm;
+}
+
 /**
  * Get index to cipher suite params.
  *
@@ -668,10 +702,12 @@ contains_cipher_suite(const dtls_cipher_t* cipher_suites, const dtls_cipher_t ci
  * \return index to cipher suite params, DTLS_CIPHER_INDEX_NULL if not found.
  */
 static inline dtls_cipher_index_t
-get_cipher_index(const dtls_cipher_t* cipher_suites, dtls_cipher_t cipher) {
-  if (contains_cipher_suite(cipher_suites, cipher)) {
+get_cipher_index(const dtls_user_parameters_t* user_parameters, dtls_cipher_t cipher, dtls_key_exchange_algorithm_t algorithm) {
+  if (contains_cipher_suite(user_parameters->cipher_suites, cipher) &&
+      contains_key_exchange_algorithm(user_parameters->key_exchange_algorithms, algorithm)) {
     for (int index = 0; index < last_cipher_suite_param ; ++index) {
-      if (cipher_suite_params[index].cipher_suite == cipher) {
+      if (cipher_suite_params[index].cipher_suite == cipher &&
+          cipher_suite_params[index].key_exchange_algorithm == algorithm) {
         return index;
       }
     }
@@ -696,7 +732,7 @@ get_cipher_suite(dtls_cipher_index_t cipher_index) {
  * \return key exchange algorithm.
  *         \c DTLS_KEY_EXCHANGE_NONE, if cipher is not supported.
  */
-static inline cipher_suite_key_exchange_algorithm_t
+static inline dtls_key_exchange_algorithm_t
 get_key_exchange_algorithm(dtls_cipher_index_t cipher_index) {
   assert(cipher_index < last_cipher_suite_param);
   return cipher_suite_params[cipher_index].key_exchange_algorithm;
@@ -784,7 +820,7 @@ static int
 known_cipher(dtls_context_t *ctx, dtls_cipher_index_t cipher_index, int is_client) {
   const int psk = is_psk_supported(ctx);
   const int ecdsa = is_ecdsa_supported(ctx, is_client);
-  const cipher_suite_key_exchange_algorithm_t key_exchange_algorithm =
+  const dtls_key_exchange_algorithm_t key_exchange_algorithm =
                                       get_key_exchange_algorithm(cipher_index);
 
   return (psk && key_exchange_algorithm == DTLS_KEY_EXCHANGE_PSK) ||
@@ -1310,7 +1346,8 @@ dtls_update_parameters(dtls_context_t *ctx,
 
   ok = 0;
   while ((i >= (int)sizeof(uint16)) && !ok) {
-    config->cipher_index = get_cipher_index(config->user_parameters.cipher_suites, dtls_uint16_to_int(data));
+    // MF: FIXME determine key exchange algorithm from extensions
+    config->cipher_index = get_cipher_index(&config->user_parameters, dtls_uint16_to_int(data), DTLS_KEY_EXCHANGE_ECDHE_ECDSA);
     ok = known_cipher(ctx, config->cipher_index, 0);
     i -= sizeof(uint16);
     data += sizeof(uint16);
@@ -1384,7 +1421,7 @@ check_client_keyexchange(dtls_context_t *ctx,
 			 dtls_handshake_parameters_t *handshake,
 			 uint8 *data, size_t length) {
 
-  const cipher_suite_key_exchange_algorithm_t key_exchange_algorithm =
+  const dtls_key_exchange_algorithm_t key_exchange_algorithm =
 		  get_key_exchange_algorithm(handshake->cipher_index);
 
   (void) ctx;
@@ -1609,7 +1646,7 @@ dtls_prepare_record(dtls_peer_t *peer, dtls_security_parameters_t *security,
     unsigned char nonce[DTLS_CCM_BLOCKSIZE];
     unsigned char A_DATA[A_DATA_LEN];
     const uint8_t mac_len = get_cipher_suite_mac_len(security->cipher_index);
-    const cipher_suite_key_exchange_algorithm_t key_exchange_algorithm =
+    const dtls_key_exchange_algorithm_t key_exchange_algorithm =
             get_key_exchange_algorithm(security->cipher_index);
     /* For backwards-compatibility, dtls_encrypt_params is called with
      * M=<macLen> and L=3. */
@@ -2716,7 +2753,7 @@ static int
 dtls_send_server_hello_msgs(dtls_context_t *ctx, dtls_peer_t *peer)
 {
   int res;
-  cipher_suite_key_exchange_algorithm_t key_exchange_algorithm;
+  dtls_key_exchange_algorithm_t key_exchange_algorithm;
 
   res = dtls_send_server_hello(ctx, peer);
 
@@ -2810,7 +2847,7 @@ dtls_send_client_key_exchange(dtls_context_t *ctx, dtls_peer_t *peer)
   uint8 buf[DTLS_CKXEC_LENGTH];
   uint8 *p;
   dtls_handshake_parameters_t *handshake = peer->handshake_params;
-  const cipher_suite_key_exchange_algorithm_t key_exchange_algorithm =
+  const dtls_key_exchange_algorithm_t key_exchange_algorithm =
           get_key_exchange_algorithm(handshake->cipher_index);
   int ret;
 
@@ -3027,7 +3064,8 @@ dtls_send_client_hello(dtls_context_t *ctx, dtls_peer_t *peer,
   /* add known cipher(s) */
   for (index = 0; handshake->user_parameters.cipher_suites[index] != TLS_NULL_WITH_NULL_NULL; ++index) {
     dtls_cipher_t code = handshake->user_parameters.cipher_suites[index];
-    dtls_cipher_index_t cipher_index = get_cipher_index(handshake->user_parameters.cipher_suites, code);
+    // MF: FIXME iterate over all combinations of suite and algorithm
+    dtls_cipher_index_t cipher_index = get_cipher_index(&handshake->user_parameters, code, DTLS_KEY_EXCHANGE_ECDHE_ECDSA);
     if (known_cipher(ctx, cipher_index, 1)) {
       dtls_int_to_uint16(p, code);
       p += sizeof(uint16);
@@ -3233,7 +3271,8 @@ check_server_hello(dtls_context_t *ctx,
 
   /* Check if the cipher suite selected by the server
    *  is in our list of cipher suites. */
-  handshake->cipher_index = get_cipher_index(handshake->user_parameters.cipher_suites, dtls_uint16_to_int(data));
+  // MF: FIXME determine key exchange algorithm from extensions
+  handshake->cipher_index = get_cipher_index(&handshake->user_parameters, dtls_uint16_to_int(data), DTLS_KEY_EXCHANGE_ECDHE_ECDSA);
 
   if (!known_cipher(ctx, handshake->cipher_index, 1)) {
     dtls_alert("unsupported cipher 0x%02x 0x%02x\n", data[0], data[1]);
@@ -3752,7 +3791,7 @@ handle_handshake_msg(dtls_context_t *ctx, dtls_peer_t *peer, uint8 *data, size_t
   int err = 0;
   const dtls_peer_type role = peer->role;
   const dtls_state_t state = peer->state;
-  const cipher_suite_key_exchange_algorithm_t key_exchange_algorithm =
+  const dtls_key_exchange_algorithm_t key_exchange_algorithm =
               get_key_exchange_algorithm(peer->handshake_params->cipher_index);
 
   /* This will clear the retransmission buffer if we get an expected
