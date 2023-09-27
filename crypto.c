@@ -200,7 +200,7 @@ void dtls_security_free(dtls_security_parameters_t *security)
 
   dtls_security_dealloc(security);
 }
-
+#if 0
 size_t
 dtls_p_hash(dtls_hashfunc_t h,
 	    const unsigned char *key, size_t keylen,
@@ -274,7 +274,7 @@ dtls_prf(const unsigned char *key, size_t keylen,
 		     random2, random2len,
 		     buf, buflen);
 }
-
+#endif
 void
 dtls_mac(dtls_hmac_context_t *hmac_ctx, 
 	 const unsigned char *record,
@@ -638,4 +638,180 @@ dtls_decrypt(const unsigned char *src, size_t length,
   const dtls_ccm_params_t params = { nonce, 8, 3 };
 
   return dtls_decrypt_params(&params, src, length, buf, key, keylen, aad, la);
+}
+
+int
+dtls_aes_encrypt_direct(const unsigned char *src,
+                        unsigned char *buf,
+                        const unsigned char *key, size_t keylen)
+{
+  int ret;
+  struct dtls_cipher_context_t *ctx = dtls_cipher_context_get();
+
+  ret = rijndael_set_key_enc_only(&ctx->data.ctx, key, 8 * keylen);
+  if (ret < 0) {
+    /* cleanup everything in case the key has the wrong size */
+    dtls_warn("cannot set rijndael key\n");
+    goto error;
+  }
+
+  rijndael_encrypt(&ctx->data.ctx, src, buf);
+
+error:
+  dtls_cipher_context_release();
+  return ret;
+}
+
+
+/*
+ * HKDF Label:
+ *  RFC 8846 Section 7.1 states that all
+ *  labels fit within 12 characters.
+ * 
+ * length                 :=  2 bytes
+ * label_length           :=  1 byte
+ * label prefix           :=  6 bytes
+ * label                  := 12 bytes
+ * context_length         :=  1 byte
+ * context                := 32 bytes (SHA256 Digest Length)
+ */
+#define HKDF_LABEL_LENGTH_MAX (2 + 1 + 6 + 12 + 1 + DTLS_HMAC_DIGEST_SIZE)
+
+int
+dtls_hkdf_extract(dtls_hashfunc_t hashfunc,
+                  const uint8_t *salt, size_t saltlen,
+                  const uint8_t *ikm, size_t ikmlen,
+                  uint8_t *prk) {
+  dtls_hmac_context_t hmac_ctx;
+  assert(prk);
+
+  if (hashfunc != HASH_SHA256)
+    return -1;
+
+  if (saltlen > 0) {
+    dtls_hmac_init(&hmac_ctx, salt, saltlen);
+  } else {
+    memset(prk, 0, DTLS_SHA256_DIGEST_LENGTH);
+    dtls_hmac_init(&hmac_ctx, prk, DTLS_SHA256_DIGEST_LENGTH);
+  }
+  dtls_hmac_update(&hmac_ctx, ikm, ikmlen);
+  return dtls_hmac_finalize(&hmac_ctx, prk);
+}
+
+int dtls_hkdf_expand(dtls_hashfunc_t hashfunc,
+                     const uint8_t *prk, size_t prklen,
+                     const uint8_t *info, size_t infolen,
+                     uint8_t *okm, size_t okmlen) {
+  static dtls_mutex_t expand_buf_mutex = DTLS_MUTEX_INITIALIZER;
+  static uint8_t buf[DTLS_SHA256_DIGEST_LENGTH];
+  uint8_t *pos = okm;
+  const size_t hashlen = DTLS_SHA256_DIGEST_LENGTH;
+  uint8_t counter = 0x01;
+  dtls_hmac_context_t initial_ctx, hmac_ctx;
+  int res = 0;
+
+  assert(prk);
+  assert(okm);
+
+  if ((hashfunc != HASH_SHA256) || (okmlen > 255 * hashlen))
+    return -1;
+
+  if (okmlen == 0)
+    return 0;
+
+  dtls_hmac_init(&initial_ctx, prk, prklen);
+
+  /* update hmac_ctx for T(1) */
+  memcpy(&hmac_ctx, &initial_ctx, sizeof(dtls_hmac_context_t));
+  if (infolen > 0)
+    dtls_hmac_update(&hmac_ctx, info, infolen);
+  dtls_hmac_update(&hmac_ctx, &counter, sizeof(uint8_t));
+  
+  dtls_mutex_lock(&expand_buf_mutex);
+  memset(buf, 0, sizeof(buf));
+
+  /* write T(i) */
+  while ((okmlen >= hashlen) && (counter > 0)) {
+    res = dtls_hmac_finalize(&hmac_ctx, pos);
+    if (res != (int)hashlen) {
+      res = -1;
+      break;
+    }
+    counter++;
+
+    memcpy(&hmac_ctx, &initial_ctx, sizeof(dtls_hmac_context_t));
+    dtls_hmac_update(&hmac_ctx, pos, hashlen);
+    if (infolen > 0)
+      dtls_hmac_update(&hmac_ctx, info, infolen);
+    dtls_hmac_update(&hmac_ctx, &counter, sizeof(uint8_t));
+
+    pos += hashlen;
+    okmlen -= hashlen;
+  }
+
+  /* write T(N) if L % hashlen != 0 */
+  if ((res >= 0) && (counter > 0)) {
+    res = dtls_hmac_finalize(&hmac_ctx, buf);
+    if (res != (int)hashlen) {
+      res = -1;
+    } else {
+      memcpy(pos, buf, okmlen);
+      pos += okmlen;
+      okmlen = 0;
+    }
+  }
+
+  dtls_mutex_unlock(&expand_buf_mutex);
+  return (res < 0) ? -1 : (pos - okm);
+}
+
+int
+dtls_hkdf_expand_label(dtls_hashfunc_t hashfunc,
+                       const uint8_t *secret, size_t secretlen,
+                       const char *label, uint8_t labellen,
+                       const uint8_t *context, uint8_t contextlen,
+                       uint8_t *okm, size_t okmlen) {
+  /* FIXME: Choose proper hkdflabel buffer size and enforce limits */
+  uint8_t hkdflabel[HKDF_LABEL_LENGTH_MAX] = { 0, 0, 0, 'd', 't', 'l', 's', '1', '3'};
+  uint8_t pos = 0;
+
+  assert(labellen <= 12);
+
+  /* Length */
+  hkdflabel[0] = (okmlen >> 8) & 0xff;
+  hkdflabel[1] = okmlen & 0xff;
+
+  /* Label */
+  hkdflabel[2] = (6 + labellen) & 0xff;
+  pos = 3 + 6;
+  memcpy(hkdflabel + pos, label, labellen);
+  pos += labellen;
+
+  /* Context */
+  hkdflabel[pos] = contextlen;
+  pos++;
+  memcpy(hkdflabel + pos, context, contextlen);
+  pos += contextlen;
+
+  return dtls_hkdf_expand(hashfunc, secret, secretlen,
+                          hkdflabel, pos, okm, okmlen);
+}
+
+int
+dtls_hkdf(dtls_hashfunc_t hashfunc,
+          const uint8_t *salt, size_t saltlen,
+          const uint8_t *ikm, size_t ikmlen,
+          const uint8_t *info, size_t infolen,
+          uint8_t *okm, size_t okmlen) {
+  static dtls_mutex_t prk_buf_mutex = DTLS_MUTEX_INITIALIZER;
+  static uint8_t buf[DTLS_SHA256_DIGEST_LENGTH];
+  int res = 0;
+
+  dtls_mutex_lock(&prk_buf_mutex);
+  res = dtls_hkdf_extract(hashfunc, salt, saltlen, ikm, ikmlen, buf);
+  if (res >= 0) {
+    res = dtls_hkdf_expand(hashfunc, buf, res, info, infolen, okm, okmlen);
+  }
+  dtls_mutex_unlock(&prk_buf_mutex);
+  return res;
 }

@@ -35,7 +35,8 @@
 #define DTLS_KEY_LENGTH        16 /* AES-128 */
 #define DTLS_BLK_LENGTH        16 /* AES-128 */
 #define DTLS_MAC_LENGTH        DTLS_HMAC_DIGEST_SIZE
-#define DTLS_IV_LENGTH         4  /* length of nonce_explicit */
+#define DTLS_IV_LENGTH         12 /* length of nonce */
+#define DTLS_SECRET_LENGTH     DTLS_SHA256_DIGEST_LENGTH
 
 /** 
  * Maximum size of the generated keyblock. Note that MAX_KEYBLOCK_LENGTH must 
@@ -43,10 +44,10 @@
  * pre-shared key + 1.
  */
 #define MAX_KEYBLOCK_LENGTH  \
-  (2 * DTLS_MAC_KEY_LENGTH + 2 * DTLS_KEY_LENGTH + 2 * DTLS_IV_LENGTH)
+  (2 * DTLS_MAC_KEY_LENGTH + 4 * DTLS_KEY_LENGTH + 2 * DTLS_IV_LENGTH)
 
 /** Length of DTLS master_secret */
-#define DTLS_MASTER_SECRET_LENGTH 48
+#define DTLS_MASTER_SECRET_LENGTH DTLS_SECRET_LENGTH
 #define DTLS_RANDOM_LENGTH 32
 
 /** Type of index in cipher parameter table */
@@ -55,7 +56,7 @@ typedef uint8_t dtls_cipher_index_t;
 #define DTLS_CIPHER_INDEX_NULL 0
 
 /** Maximum number of cipher suites */
-#define DTLS_MAX_CIPHER_SUITES 6 // MF: TODO change to 2
+#define DTLS_MAX_CIPHER_SUITES 4
 
 /** Maximum number of key exchange algorithms */
 #define DTLS_MAX_KEY_EXCHANGE_ALGORITHMS 2
@@ -113,6 +114,17 @@ typedef struct {
     uint64_t bitfield;
 } seqnum_t;
 
+/* Maximum CID length. */
+#ifndef DTLS_MAX_CID_LENGTH
+#define DTLS_MAX_CID_LENGTH 16
+#endif
+
+#if (DTLS_MAX_CID_LENGTH > 0)
+#ifndef DTLS_USE_CID_DEFAULT
+#define DTLS_USE_CID_DEFAULT 1
+#endif /* DTLS_USE_CID_DEFAULT */
+#endif /* DTLS_MAX_CID_LENGTH > 0 */
+
 typedef struct {
   dtls_compression_t compression;	/**< compression method */
 
@@ -127,7 +139,21 @@ typedef struct {
    * access the components of the key block.
    */
   uint8 key_block[MAX_KEYBLOCK_LENGTH];
-  
+
+  /**
+   * One of:
+   *  client_early_traffic_secret
+   *  client/server_handshake_traffic_secret
+   *  client/server_application_traffic_secret_N
+  */
+  uint8 client_traffic_secret[DTLS_SECRET_LENGTH];
+  uint8 server_traffic_secret[DTLS_SECRET_LENGTH];
+
+#if (DTLS_MAX_CID_LENGTH > 0)
+  uint8_t write_cid[DTLS_MAX_CID_LENGTH];
+  uint8_t write_cid_length;
+#endif /* DTLS_MAX_CID_LENGTH > 0 */
+
   seqnum_t cseq;        /**<sequence number of last record received*/
 } dtls_security_parameters_t;
 
@@ -144,23 +170,39 @@ typedef struct dtls_user_parameters_t {
   dtls_cipher_t cipher_suites[DTLS_MAX_CIPHER_SUITES + 1];
   dtls_key_exchange_algorithm_t key_exchange_algorithms[DTLS_MAX_KEY_EXCHANGE_ALGORITHMS + 1];
   unsigned int force_extended_master_secret:1; /** force extended master secret extension (RFC7627) */
+#if (DTLS_MAX_CID_LENGTH > 0)
+  unsigned int support_cid:1;                  /** indicate CID support (RFC9146) */
+#endif
 } dtls_user_parameters_t;
 
 typedef struct {
   union {
     struct random_t {
+      // MF: do the random values need to be saved in DTLS 1.3?
       uint8 client[DTLS_RANDOM_LENGTH];	/**< client random gmt and bytes */
       uint8 server[DTLS_RANDOM_LENGTH];	/**< server random gmt and bytes */
     } random;
+    // MF: note. if the first Client Hello is sending a non empty KeyShare
+    // with a valid group, the generated keys have to be saved too.
+    uint8 early_secret[DTLS_SECRET_LENGTH];
+    uint8 handshake_secret[DTLS_SECRET_LENGTH];
     /** the session's master secret */
     uint8 master_secret[DTLS_MASTER_SECRET_LENGTH];
   } tmp;
+
   struct netq_t *reorder_queue;	/**< the packets to reorder */
   dtls_hs_state_t hs_state;  /**< handshake protocol status */
 
   dtls_compression_t compression;		/**< compression method */
   dtls_user_parameters_t user_parameters;	/**< user parameters */
   dtls_cipher_index_t cipher_index;		/**< internal index for cipher_suite_params, DTLS_CIPHER_INDEX_NULL for TLS_NULL_WITH_NULL_NULL */
+
+#if (DTLS_MAX_CID_LENGTH > 0)
+  uint8_t write_cid[DTLS_MAX_CID_LENGTH];
+  uint8_t write_cid_length;
+#endif /* DTLS_MAX_CID_LENGTH > 0 */
+
+  unsigned int second_client_hello:1;
   unsigned int do_client_auth:1;
   unsigned int extended_master_secret:1;
   union {
@@ -214,6 +256,18 @@ typedef struct {
    ? dtls_kb_client_iv(Param, Role)					\
    : dtls_kb_server_iv(Param, Role))
 #define dtls_kb_iv_size(Param, Role) DTLS_IV_LENGTH
+#define dtls_kb_client_sn_key(Param, Role)                           \
+  (dtls_kb_server_iv(Param, Role) + DTLS_IV_LENGTH)
+#define dtls_kb_server_sn_key(Param, Role)                           \
+  (dtls_kb_client_sn_key(Param, Role) + DTLS_KEY_LENGTH)
+#define dtls_kb_remote_sn_key(Param, Role)                           \
+  ((Role) == DTLS_SERVER                                             \
+   ? dtls_kb_client_sn_key(Param, Role)                              \
+   : dtls_kb_server_sn_key(Param, Role))
+#define dtls_kb_local_sn_key(Param, Role)                            \
+  ((Role) == DTLS_CLIENT                                             \
+   ? dtls_kb_client_sn_key(Param, Role)                              \
+   : dtls_kb_server_sn_key(Param, Role))
 
 #define dtls_kb_size(Param, Role)					\
   (2 * (dtls_kb_mac_secret_size(Param, Role) +				\
@@ -221,7 +275,7 @@ typedef struct {
 
 /* just for consistency */
 #define dtls_kb_digest_size(Param, Role) DTLS_MAC_LENGTH
-
+#if 0
 /** 
  * Expands the secret and key to a block of DTLS_HMAC_MAX 
  * size according to the algorithm specified in section 5 of
@@ -259,7 +313,7 @@ size_t dtls_prf(const unsigned char *key, size_t keylen,
 		const unsigned char *random1, size_t random1len,
 		const unsigned char *random2, size_t random2len,
 		unsigned char *buf, size_t buflen);
-
+#endif
 /**
  * Calculates MAC for record + cleartext packet and places the result
  * in \p buf. The given \p hmac_ctx must be initialized with the HMAC
@@ -405,6 +459,82 @@ int dtls_decrypt(const unsigned char *src, size_t length,
 		 const unsigned char *nonce,
 		 const unsigned char *key, size_t keylen,
 		 const unsigned char *a_data, size_t a_data_length);
+
+int dtls_aes_encrypt_direct(const unsigned char *src,
+                            unsigned char *buf,
+                            const unsigned char *key, size_t keylen);
+
+/**
+ * Performs the HKDF-Extract step and writes the result to @p prk.
+ *
+ * @param hashfunc  The hash function to use for HMAC. Currently,
+ *                  only HASH_SHA256 is supported.
+ * @param salt      The salt to use. May be NULL if @p saltlen == 0.
+ * @param saltlen   The length of @p salt in bytes.
+ * @param ikm       The input keying material. This must not be NULL.
+ * @param ikmlen    The length of @p ikm in bytes, must be > 0.
+ * @param prk       The pseudo-random key returned by HKDF-Extract.
+ *                  @p prk must refer to a buffer of sufficient
+ *                  size for the result of @p hashfunc.
+ * @return          The number of bytes written to @p prk on success
+ *                  or -1 on error.
+ */
+int dtls_hkdf_extract(dtls_hashfunc_t hashfunc,
+                      const uint8_t *salt, size_t saltlen,
+                      const uint8_t *ikm, size_t ikmlen,
+                      uint8_t *prk);
+
+/**
+ * Performs the HKDF-Expand step and writes @p okmlen result bytes to
+ * @p okm.
+ *
+ * @param hashfunc  The hash function to use for HMAC. Currently,
+ *                  only HASH_SHA256 is supported.
+ * @param prk       The pseudo-random key to use. This is usually
+ *                  the result from dtls_hkdf_extract().
+ * @param prklen    The length of @p prk in bytes.
+ * @param info      Optional info, may be NULL if @p infolen == 0.
+ * @param infolen   The length of @p info in bytes.
+ * @param okm       The output keying material returned by HKDF-Expand.
+ *                  On success, @p okmlen bytes are written to @p okm.
+ * @param okmlen    The size of the output buffer @p okm.
+ * @return          The number of bytes written to @p okm on success
+ *                  or -1 on error.
+ */
+int dtls_hkdf_expand(dtls_hashfunc_t hashfunc,
+                     const uint8_t *prk, size_t prklen,
+                     const uint8_t *info, size_t infolen,
+                     uint8_t *okm, size_t okmlen);
+
+/**
+ * Convenience function to perform the HKDF-Extract and
+ * HKDF-Expand.
+ *
+ * @param hashfunc  The hash function to use for HMAC. Currently,
+ *                  only HASH_SHA256 is supported.
+ * @param salt      The salt to use. May be NULL if @p saltlen == 0.
+ * @param saltlen   The length of @p salt in bytes.
+ * @param ikm       The input keying material. This must not be NULL.
+ * @param ikmlen    The length of @p ikm in bytes, must be > 0.
+ * @param info      Optional info, may be NULL if @p infolen == 0.
+ * @param infolen   The length of @p info in bytes.
+ * @param okm       The output keying material returned by HKDF-Expand.
+ *                  On success, @p okmlen bytes are written to @p okm.
+ * @param okmlen    The size of the output buffer @p okm.
+ * @return          The number of bytes written to @p okm on success
+ *                  or -1 on error.
+ */
+int dtls_hkdf(dtls_hashfunc_t hashfunc,
+              const uint8_t *salt, size_t saltlen,
+              const uint8_t *ikm, size_t ikmlen,
+              const uint8_t *info, size_t infolen,
+              uint8_t *okm, size_t okmlen);
+
+int dtls_hkdf_expand_label(dtls_hashfunc_t hashfunc,
+                           const uint8_t *secret, size_t secretlen,
+                           const char *label, uint8_t labellen,
+                           const uint8_t *context, uint8_t contextlen,
+                           uint8_t *okm, size_t okmlen);
 
 /* helper functions */
 

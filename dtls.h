@@ -335,12 +335,14 @@ int dtls_write(struct dtls_context_t *ctx, session_t *session,
  */
 void dtls_check_retransmit(dtls_context_t *context, clock_time_t *next);
 
-#define DTLS_COOKIE_LENGTH 16
+#define DTLS_COOKIE_MAC_LENGTH 16
 
 #define DTLS_CT_CHANGE_CIPHER_SPEC 20
 #define DTLS_CT_ALERT              21
 #define DTLS_CT_HANDSHAKE          22
 #define DTLS_CT_APPLICATION_DATA   23
+#define DTLS_CT_TLS12_CID          25
+#define DTLS_CT_ACK                26
 
 #ifdef __GNUC__
 #define PACK( __Declaration__ ) __Declaration__ __attribute__((__packed__))
@@ -349,6 +351,13 @@ void dtls_check_retransmit(dtls_context_t *context, clock_time_t *next);
 #else
 #error "Structure packing is not available for the used compiler."
 #endif
+
+PACK(typedef struct) {
+  unsigned char hash[DTLS_SHA256_DIGEST_LENGTH]; /**< hash of first client hello */
+  uint16 cipher_suite; /**< selected cipher suite */
+  uint16 named_group; /**< selected_group in KeyShareHelloRetryRequest */
+  unsigned char mac[DTLS_COOKIE_MAC_LENGTH]; /**< Cookie MAC */
+} dtls_cookie_t;
 
 /** Generic header structure of the DTLS record layer. */
 PACK(typedef struct) {
@@ -362,10 +371,15 @@ PACK(typedef struct) {
 
 /* Handshake types */
 
+// MF: ht in enum?
 #define DTLS_HT_HELLO_REQUEST        0
 #define DTLS_HT_CLIENT_HELLO         1
 #define DTLS_HT_SERVER_HELLO         2
 #define DTLS_HT_HELLO_VERIFY_REQUEST 3
+#define DTLS_HT_HELLO_RETRY_REQUEST  6
+#define DTLS_HT_ENCRYPTED_EXTENSIONS 8
+#define DTLS_HT_REQUEST_CONNECTION_ID 9
+#define DTLS_HT_NEW_CONNECTION_ID   10
 #define DTLS_HT_CERTIFICATE         11
 #define DTLS_HT_SERVER_KEY_EXCHANGE 12
 #define DTLS_HT_CERTIFICATE_REQUEST 13
@@ -373,6 +387,8 @@ PACK(typedef struct) {
 #define DTLS_HT_CERTIFICATE_VERIFY  15
 #define DTLS_HT_CLIENT_KEY_EXCHANGE 16
 #define DTLS_HT_FINISHED            20
+#define DTLS_HT_KEY_UPDATE          24
+#define DTLS_HT_MESSAGE_HASH       254
 
 /**
  * Pseudo handshake message type, if no optional handshake message is expected.

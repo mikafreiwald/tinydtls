@@ -50,6 +50,7 @@ typedef enum {
   DTLS_ALERT_INTERNAL_ERROR = 80,		/* internal_error */
   DTLS_ALERT_USER_CANCELED = 90,		/* user_canceled */
   DTLS_ALERT_NO_RENEGOTIATION = 100,		/* no_renegotiation */
+  DTLS_ALERT_MISSING_EXTENSION = 109,		/* missing_extension */
   DTLS_ALERT_UNSUPPORTED_EXTENSION = 110	/* unsupported_extension */
 } dtls_alert_t;
 

@@ -97,13 +97,23 @@ typedef enum {
   TLS_COMPRESSION_NULL = 0x0000		/* NULL compression */
 } dtls_compression_t;
 
+#define TLS_EXT_SUPPORTED_GROUPS	10
 #define TLS_EXT_ELLIPTIC_CURVES		10 /* see RFC 4492 */
 #define TLS_EXT_EC_POINT_FORMATS	11 /* see RFC 4492 */
+#define TLS_EXT_SIGNATURE_ALGORITHMS 13
 #define TLS_EXT_SIG_HASH_ALGO		13 /* see RFC 5246 */
 #define TLS_EXT_CLIENT_CERTIFICATE_TYPE	19 /* see RFC 7250 */
 #define TLS_EXT_SERVER_CERTIFICATE_TYPE	20 /* see RFC 7250 */
 #define TLS_EXT_ENCRYPT_THEN_MAC	22 /* see RFC 7366 */
 #define TLS_EXT_EXTENDED_MASTER_SECRET	23 /* see RFC 7627 */
+
+#define TLS_EXT_PRE_SHARED_KEY 41
+#define TLS_EXT_EARLY_DATA 42
+#define TLS_EXT_SUPPORTED_VERSIONS 43
+#define TLS_EXT_COOKIE 44
+#define TLS_EXT_PSK_KEY_EXCHANGE_MODES 45
+#define TLS_EXT_KEY_SHARE 51
+#define TLS_EXT_CONNECTION_ID		54 /* see RFC 9146 */
 
 #define TLS_CERT_TYPE_RAW_PUBLIC_KEY	2 /* see RFC 7250 */
 
@@ -117,6 +127,17 @@ typedef enum {
 
 #define TLS_EXT_SIG_HASH_ALGO_SHA256		4 /* see RFC 5246 */
 #define TLS_EXT_SIG_HASH_ALGO_ECDSA		3 /* see RFC 5246 */
+
+#define TLS_NAMED_GROUP_SECP256R1 23
+#define TLS_SIGNATURE_SCHEME_ECDSA_SECP256R1_SHA256 0x0403
+
+// MF: Maybe rename dtls_key_type in something like key epoch
+typedef enum {
+  EARLY_DATA_KEY = 1,
+  HANDSHAKE_KEY,
+  TRAFFIC_KEY, // APP_DATA_0_KEY ?
+  UPDATE_TRAFFIC_KEY
+} dtls_key_type;
 
 /** 
  * XORs \p n bytes byte-by-byte starting at \p y to the memory area
